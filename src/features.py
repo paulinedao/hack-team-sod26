@@ -172,7 +172,7 @@ def build(game=GAME, data_dir=None):
                             (ball[:,1] < -OUT_MARGIN_M) | (ball[:,1] > width + OUT_MARGIN_M))
     (table["ball_speed"], table["ball_speed_smooth"], table["ball_accel"]) = ball_motion(ball, GAMES[game]["fps"])
     
-    for name, values in nearest_by_team(players, ball), team_of_track.items():
+    for name, values in nearest_by_team(players, ball, team_of_track).items():
         table[name] = values
     table["nearest_team"] = nearest_team(table["d_home"].to_numpy(), table["d_away"].to_numpy())
     table["margin"] = table["d_away"] - table["d_home"]
