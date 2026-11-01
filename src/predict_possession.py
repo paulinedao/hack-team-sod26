@@ -53,24 +53,25 @@ sys.path.insert(0, os.path.join(ROOT, "evaluation"))
 from games import DATA_DIR, GAME, GAMES
 from starter.baseline import AWAY, HOME
 
-
-# TUNABLE PARAMETERS  
+# TUNABLE PARAMETERS  to tweak
 # Times are in SECONDS (converted to frames with the game's fps),
 # distances in METRES.
 
-
-# Use of Smart Tagging 
-USE_SMART_TAGGING = True      # False = tracking features only (check the rules!)
+# Smart tagging 
+USE_SMART_TAGGING = True      # False = tracking features only
 DEAD_FROM_SET_PIECE_TAG = True
 DEAD_FROM_GOAL_TAG = True
-TAG_POSS_BONUS = 0.50         # added to score toward the team in a possession tag
-TAG_DEF_BONUS = 0.25          # added toward the OPPONENT of a defending-team tag
+TAG_POSS_BONUS = 0.0         # added to score toward the team in a possession tag
+TAG_DEF_BONUS = 0.0          # added toward the OPPONENT of a defending-team tag
 
 # Dead ball (D) 
 BALL_OUT_MIN_S = 1.0          # ball outside pitch at least this long -> D
 BALL_LOST_DEAD_S = 4.0        # ball untracked this long near a boundary -> D
 BOUNDARY_NEAR_M = 3.0         # "near a boundary" distance for the rule above
-DEAD_BRIDGE_S = 1.0           # alive gap shorter than this between two D stretches -> D
+DEAD_FROM_STATIONARY_BALL = True   # ball (almost) not moving for a while -> D
+STATIONARY_SPEED_MS = 1.0     # smoothed ball speed below this = stationary
+STATIONARY_MIN_S = 2.0        # ... for at least this long
+DEAD_BRIDGE_S = 1.0          # alive gap shorter than this between two D stretches -> D
 
 # Possession score: component weights (relative; normalised internally) 
 W_PROXIMITY = 3.0             # nearest-player distance gap (home vs away)
@@ -91,9 +92,9 @@ SCORE_SMOOTH_S = 0.6          # centred rolling-mean window on the score
 
 # Decision rule
 ENTER_THRESHOLD = 0.25        # |score| needed to assign a team after a stoppage
-SWITCH_THRESHOLD = 0.25       # |score| needed to flip from one team to the other
+SWITCH_THRESHOLD = 0.35       # |score| needed to flip from one team to the other
 RESET_AFTER_DEAD = True       # after a D spell, forget the previous possessor
-MIN_SPELL_S = 1.0             # absorb H/A spells shorter than this
+MIN_SPELL_S = 2.0             # absorb H/A spells shorter than this
 
 # Output
 SUBMISSION_COLUMNS = ["frame", "label"]   # what read_label_csv requires
@@ -104,7 +105,7 @@ RESULTS_DIR = os.path.join(ROOT, "evaluation", "my_results")   # created if miss
 PERSISTENCE_WINDOWS = (25, 50)
 DISTANCE_TREND_LAG = 10
 
-#Tuning search space (used by --tune); keep grids coarse
+# Tuning search space (used by --tune); keep grids coarse
 TUNE_GRID = {
     "ENTER_THRESHOLD": [0.10, 0.20, 0.30, 0.40],
     "SWITCH_THRESHOLD": [0.10, 0.20, 0.30, 0.40, 0.50],
@@ -117,7 +118,6 @@ TUNE_GRID = {
     "TAG_POSS_BONUS": [0.0, 0.25, 0.5, 0.75],
 }
 TUNE_ROUNDS = 2
-
 
 PARAMETER_NOTES = [
     ("USE_SMART_TAGGING", "tags allowed as input? confirm with organisers"),
@@ -148,7 +148,7 @@ def frames(seconds, fps):
     return max(1, int(round(seconds * fps)))
 
 
-# ---------------------------------------------------------------- helpers
+# helpers
 def long_runs(mask, min_len):
     """Keep only the True runs of `mask` that last at least `min_len` frames."""
     mask = np.asarray(mask, dtype=bool)
@@ -184,15 +184,18 @@ def as_bool(series):
 
 
 # dead ball
-def dead_frames(table, fps, pitch):
-    """Boolean mask of dead-ball frames (D)."""
+def dead_sources(table, fps, pitch):
+    """Each dead-ball rule as its own boolean mask (before gap bridging)."""
     n = len(table)
-    tagged = np.zeros(n, dtype=bool)
+    none = np.zeros(n, dtype=bool)
+
+    set_piece = none
+    goal = none
     if USE_SMART_TAGGING:
         if DEAD_FROM_SET_PIECE_TAG:
-            tagged |= as_bool(table["tag_dead"])
+            set_piece = as_bool(table["tag_dead"])
         if DEAD_FROM_GOAL_TAG:
-            tagged |= as_bool(table["tag_goal"])
+            goal = as_bool(table["tag_goal"])
 
     out_of_play = long_runs(as_bool(table["ball_out"]), frames(BALL_OUT_MIN_S, fps))
 
@@ -205,8 +208,23 @@ def dead_frames(table, fps, pitch):
         & (since >= frames(BALL_LOST_DEAD_S, fps))
         & near_boundary(last_x, last_y, pitch, BOUNDARY_NEAR_M)
     )
+    stationary = none
+    if DEAD_FROM_STATIONARY_BALL:
+        slow = table["ball_speed_smooth"].fillna(np.inf).to_numpy() < STATIONARY_SPEED_MS
+        stationary = long_runs(slow & ~missing, frames(STATIONARY_MIN_S, fps))
 
-    dead = tagged | out_of_play | lost_near_line
+    return {
+        "set-piece tag": set_piece,
+        "goal tag": goal,
+        "ball outside pitch": out_of_play,
+        "ball lost near line": lost_near_line,
+        "ball stationary": stationary,
+    }
+
+
+def dead_frames(table, fps, pitch):
+    """Boolean mask of dead-ball frames (D)."""
+    dead = np.logical_or.reduce(list(dead_sources(table, fps, pitch).values()))
     return fill_short_gaps(dead, frames(DEAD_BRIDGE_S, fps))
 
 
@@ -435,6 +453,92 @@ def tune(table, game, gt_codes, pm):
     return best
 
 
+# diagnosis
+ABLATIONS = [
+    ("current settings", {}),
+    ("no Smart Tagging at all", {"USE_SMART_TAGGING": False}),
+    ("tags for D only (no team prior)", {"TAG_POSS_BONUS": 0.0, "TAG_DEF_BONUS": 0.0}),
+    ("no set-piece D", {"DEAD_FROM_SET_PIECE_TAG": False}),
+    ("no D at all (tags kept for team)", {
+        "DEAD_FROM_SET_PIECE_TAG": False, "DEAD_FROM_GOAL_TAG": False,
+        "BALL_OUT_MIN_S": 1e6, "BALL_LOST_DEAD_S": 1e6}),
+    ("tracking only, no D", {
+        "USE_SMART_TAGGING": False, "BALL_OUT_MIN_S": 1e6, "BALL_LOST_DEAD_S": 1e6}),
+    ("longer spells (switch 0.4, min 3 s)", {"SWITCH_THRESHOLD": 0.4, "MIN_SPELL_S": 3.0}),
+]
+
+
+def mask_runs(mask):
+    padded = np.concatenate(([0], np.asarray(mask, dtype=np.int8), [0]))
+    edges = np.diff(padded)
+    return list(zip(np.flatnonzero(edges == 1).tolist(), np.flatnonzero(edges == -1).tolist()))
+
+
+def label_mix(codes, pm):
+    counts = np.bincount(codes, minlength=pm.N_LABELS)
+    total = max(1, counts.sum())
+    return "  ".join("{} {:3.0f}%".format(pm.LABELS[k], 100.0 * counts[k] / total)
+                     for k in range(pm.N_LABELS) if counts[k])
+
+
+def diagnose(table, game, gt_codes, pm, n_segments=15):
+    """Show where the prediction disagrees with the ground truth and which rule causes it."""
+    fps = GAMES[game]["fps"]
+    pitch = GAMES[game]["pitch"]
+    out = predict(table, game)
+    pred = pm.label_codes(out["label"].to_numpy())
+    result = pm.evaluate(gt_codes, pred)
+    runs = pm.valid_runs(gt_codes)
+
+    print("\n=== DIAGNOSIS ===")
+    print("ground-truth graded frames : {}".format(runs))
+    print("this script's graded halves: {}".format(mask_runs(table["half"].to_numpy() > 0)))
+
+    print("\nconfusion (rows = ground truth, columns = prediction), frames:")
+    print("          " + "".join("{:>9}".format(name) for name in pm.LABELS))
+    for k, name in enumerate(pm.SCORED):
+        print("  GT {:<3} ".format(name) + "".join("{:>9}".format(v) for v in result["confusion"][k]))
+    team = result["team_acc_both_alive"]
+    print("team accuracy when both say the ball is alive: {:.1%}".format(team))
+    if team < 0.5:
+        print("  WARNING: below 50% -> check whether HOME/AWAY are swapped (tags or tracks)")
+
+    print("\nfirst {} ground-truth segments and what we predicted inside them:".format(n_segments))
+    for start, stop, code in pm.segments(gt_codes, runs)[:n_segments]:
+        print("  frames {:>7}-{:<7} {:5.1f}s  GT {}  ->  {}".format(
+            start, stop, (stop - start) / float(fps), pm.LABELS[code],
+            label_mix(pred[start:stop], pm)))
+
+    graded = gt_codes != pm.X
+    sources = dead_sources(table, fps, pitch)
+    union = np.logical_or.reduce(list(sources.values()))
+    sources["added by bridging"] = dead_frames(table, fps, pitch) & ~union
+    print("\nD rules inside the graded frames (share of those frames the ground truth calls D):")
+    for name, mask in sources.items():
+        selected = mask & graded
+        if selected.any():
+            print("  {:<22} {:>7} frames, {:5.1%} are GT D".format(
+                name, int(selected.sum()), float(np.mean(gt_codes[selected] == pm.D))))
+        else:
+            print("  {:<22} {:>7} frames".format(name, 0))
+
+    print("\nablations on the full ground truth:")
+    print("  {:<36} {:>8} {:>8} {:>6} {:>8} {:>10}".format(
+        "variant", "spellF1", "macroF1", "D-F1", "teamAcc", "poss p/gt"))
+    for name, overrides in ABLATIONS:
+        saved = {key: globals()[key] for key in overrides}
+        for key, value in overrides.items():
+            set_param(key, value)
+        try:
+            res = pm.evaluate(gt_codes, pm.label_codes(predict(table, game)["label"].to_numpy()))
+        finally:
+            for key, value in saved.items():
+                set_param(key, value)
+        print("  {:<36} {:>8.4f} {:>8.4f} {:>6.3f} {:>8.3f} {:>6}/{}".format(
+            name, res["spell_f1_mean"], res["macro_f1"], res["per_class"]["D"]["f1"],
+            res["team_acc_both_alive"], res["n_pred_spells"], res["n_gt_spells"]))
+
+
 def print_best_parameters():
     print("\n=== TUNED VALUES (paste into TUNABLE PARAMETERS) ===")
     for name in TUNE_GRID:
@@ -476,6 +580,8 @@ def main():
     parser.add_argument("--tune", action="store_true", help="search TUNE_GRID on --gt")
     parser.add_argument("--tune-on-half", type=int, choices=(1, 2),
                         help="tune on this half only and report the other half held out")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="with --gt: confusion matrix, segment-by-segment view, D rules, ablations")
     parser.add_argument("--debug", action="store_true", help="also write half and score")
     args = parser.parse_args()
 
@@ -527,6 +633,11 @@ def main():
                          "HELD-OUT half {}".format(other))
         else:
             print_scores(pm.evaluate(gt_codes, pred_codes), "full match")
+
+    if args.diagnose:
+        if gt_codes is None:
+            sys.exit("--diagnose needs --gt")
+        diagnose(features, args.game, gt_codes, pm)
 
     print_summary(out, features)
 
