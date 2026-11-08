@@ -58,7 +58,7 @@ from starter.baseline import AWAY, HOME
 # distances in METRES.
 
 # Smart tagging 
-USE_SMART_TAGGING = True      # False = tracking features only
+USE_SMART_TAGGING = False      # False = tracking features only
 DEAD_FROM_SET_PIECE_TAG = True
 DEAD_FROM_GOAL_TAG = True
 TAG_POSS_BONUS = 0.0         # added to score toward the team in a possession tag
