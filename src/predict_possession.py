@@ -21,7 +21,8 @@ Strategy (rule based, every step is explainable to the domain expert):
     1. Dead ball (D)   : ball outside the pitch for a sustained time, ball lost near a
                          boundary, ball not moving for a while (optionally Smart Tagging
                          set-piece / goal frames). Short alive gaps between two D
-                         stretches are bridged into D.
+                         stretches are bridged into D. Graded frames before the
+                         second-half kick-off are D (FAQ; frames from games.py).
     2. Possession score: a value in [-1, 1] per frame (+1 = home, -1 = away) mixing
                          nearest-player proximity, how long each team has been nearest,
                          whether a team is closing in on the ball, crowding around the
@@ -49,7 +50,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "evaluation"))
 
-from games import DATA_DIR, GAME, GAMES
+from games import DATA_DIR, GAME, GAMES, anchor_video_frame, half_video_blocks
 from starter.baseline import AWAY, HOME
 
 
@@ -68,6 +69,8 @@ DEAD_FROM_STATIONARY_BALL = True   # [CLIP] rule added after seeing D-rule resul
 STATIONARY_SPEED_MS = 1.0     # [CLIP] smoothed ball speed below this = stationary
 STATIONARY_MIN_S = 2.0        # [CLIP] ... for at least this long
 DEAD_BRIDGE_S = 1.0           # alive gap shorter than this between two D stretches -> D
+D_BEFORE_KICKOFF = True       # FAQ: graded frames before the 2nd-half kick-off are all D
+PRE_KICKOFF_ANCHORS = {2: "kickoff_2nd"}   # half -> kick-off anchor in games.py; half 1 is graded from its kick-off
 
 # Possession score: component weights (relative; normalised internally) 
 W_PROXIMITY = 3.0             # nearest-player distance gap (home vs away)
@@ -115,6 +118,7 @@ PARAMETER_NOTES = [
     ("STATIONARY_SPEED_MS", "m/s, below this the ball counts as stationary"),
     ("STATIONARY_MIN_S", "s the ball must stay stationary"),
     ("DEAD_BRIDGE_S", "s alive gap between two D stretches that becomes D"),
+    ("D_BEFORE_KICKOFF", "graded frames before the 2nd-half kick-off -> D"),
     ("W_PROXIMITY", "weight: nearest-player distance gap"),
     ("W_PERSISTENCE", "weight: share of recent frames each team was nearest"),
     ("W_TREND", "weight: which team is closing in"),
@@ -136,7 +140,7 @@ def frames(seconds, fps):
 
 # helpers
 def long_runs(mask, min_len):
-    """Keep only the True runs of `mask` that last at least `min_len` frames."""
+    """Keep only the True runs of mask that last at least min_len frames."""
     mask = np.asarray(mask, dtype=bool)
     out = np.zeros_like(mask)
     padded = np.concatenate(([False], mask, [False]))
@@ -148,7 +152,7 @@ def long_runs(mask, min_len):
 
 
 def fill_short_gaps(mask, max_gap):
-    """Set to True the False gaps of at most `max_gap` frames that sit between two True runs."""
+    """Set to True the False gaps of at most max_gap frames that sit between two True runs."""
     out = mask.copy()
     idx = np.flatnonzero(mask)
     if len(idx) < 2:
@@ -212,6 +216,22 @@ def dead_frames(table, fps, pitch):
     """Boolean mask of dead-ball frames (D)."""
     dead = np.logical_or.reduce(list(dead_sources(table, fps, pitch).values()))
     return fill_short_gaps(dead, frames(DEAD_BRIDGE_S, fps))
+
+
+def pre_kickoff_frames(table, game):
+    """Graded frames before their half's kick-off, which the FAQ defines as D.
+
+    The second half is graded from the first frame of its tracking block (110,808) but the ball
+    is struck at the kick-off anchor (113,741): those 2,934 frames, anchor included, are D. Both
+    frames come from games.py, so nothing here is read off the video or the ground truth.
+    """
+    frame = table["frame"].to_numpy()
+    mask = np.zeros(len(table), dtype=bool)
+    first_graded = {half: first for half, first, _ in half_video_blocks(game)}
+    for half, anchor in PRE_KICKOFF_ANCHORS.items():
+        kickoff = anchor_video_frame(GAMES[game][anchor])
+        mask |= (frame >= first_graded[half]) & (frame <= kickoff)
+    return mask
 
 
 # possession score
@@ -345,6 +365,8 @@ def predict(table, game):
     pitch = GAMES[game]["pitch"]
 
     dead = dead_frames(table, fps, pitch)
+    if D_BEFORE_KICKOFF:
+        dead |= pre_kickoff_frames(table, game)
     score = possession_score(table, fps)
 
     labels = np.full(len(table), UNGRADED_LABEL, dtype="<U1")
