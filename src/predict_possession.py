@@ -35,6 +35,11 @@ Strategy (rule based, every step is explainable to the domain expert):
     5. Cleanup         : H/A spells shorter than MIN_SPELL_S are absorbed by their
                          longest neighbour.
 
+    With USE_HMM, steps 4-5 (and the score smoothing and D gap bridging) are replaced by a
+    three-state hidden Markov model decoded with Viterbi: evidence = proximity x reliability
+    for H/A and the dead-ball rules as soft probabilities for D; transition probabilities
+    come from published football statistics (see the HMM block of the PARAMETERS).
+
 All tunable numbers live in the PARAMETERS block below.
 """
 
@@ -95,6 +100,27 @@ SWITCH_THRESHOLD = 0.35       # [CLIP] |score| needed to flip from one team to t
 RESET_AFTER_DEAD = True       # after a D spell, forget the previous possessor
 MIN_SPELL_S = 2.0             # [CLIP] absorb H/A spells shorter than this
 
+# Hidden Markov model + Viterbi. When on, it replaces the score smoothing, the state machine,
+# the D gap bridging and the spell cleanup above. Evidence: proximity x reliability for H/A,
+# the dead-ball rules as soft probabilities for D.
+USE_HMM = True
+MEAN_POSSESSION_S = 15.0      # ~57 min ball in play / ~230 possessions (Taha & Ali 2023; Jerome et al. 2024)
+MEAN_DEAD_S = 18.7            # mean game interruption (Siegle & Lames 2012)
+SHARE_ENDED_BY_STOPPAGE = 0.47  # running phase 32.1 s / possession 15 s (Siegle & Lames 2012)
+MIN_CONTROL_S = 2.0           # CHALLENGE.md: possession only changes on controlled possession ("a player
+                              # keeps the ball for a few seconds"), so a possession won in open play lasts at least this
+FLIP_SCORE = 0.5              # counter-evidence of this strength ...
+FLIP_S = 1.0                  # ... must last this long to start a new possession (one player possession ~1.1 s, Carling 2010)
+DEAD_PROB_BASE = 0.1          # dead-ball probability on a frame where no rule fires
+DEAD_PROB = {                 # dead-ball probability when a rule fires (combined by noisy-OR)
+    "ball outside pitch": 0.95,   # IFAB Law 9: out of play once wholly over the line
+    "ball lost near line": 0.7,
+    "ball stationary": 0.6,       # IFAB Laws 13/16: ball stationary at restarts, but also when held
+    "set-piece tag": 0.6,
+    "goal tag": 0.9,
+    "before kick-off": 0.999,     # FAQ: all D
+}
+
 # Output
 SUBMISSION_COLUMNS = ["frame", "label"]   # what read_label_csv requires
 UNGRADED_LABEL = "X"                      # written outside the graded halves only
@@ -131,6 +157,14 @@ PARAMETER_NOTES = [
     ("SWITCH_THRESHOLD", "|score| to flip the team in possession"),
     ("RESET_AFTER_DEAD", "forget the possessor after D"),
     ("MIN_SPELL_S", "s minimum H/A spell"),
+    ("USE_HMM", "HMM + Viterbi instead of smoothing/state machine/cleanup"),
+    ("MEAN_POSSESSION_S", "s, HMM prior: mean possession"),
+    ("MEAN_DEAD_S", "s, HMM prior: mean stoppage"),
+    ("SHARE_ENDED_BY_STOPPAGE", "HMM prior: share of possessions ended by a stoppage"),
+    ("MIN_CONTROL_S", "s a possession won in open play must last (controlled possession)"),
+    ("FLIP_SCORE", "HMM: counter-evidence strength ..."),
+    ("FLIP_S", "s ... needed to start a new possession"),
+    ("DEAD_PROB_BASE", "HMM: dead-ball probability when no rule fires"),
 ]
 
 
@@ -235,6 +269,22 @@ def pre_kickoff_frames(table, game):
 
 
 # possession score
+def proximity_evidence(table):
+    """Nearest-player distance gap in [-1, 1]: positive when the nearest home player is closer."""
+    d_home = table["d_home"].fillna(D_FILL_M)
+    d_away = table["d_away"].fillna(D_FILL_M)
+    return np.tanh((d_away - d_home) / PROX_SCALE_M)
+
+
+def reliability_factor(table):
+    """1.0 where proximity says something about possession, damped for a ball in flight or far from everyone."""
+    nearest = np.minimum(table["d_home"].fillna(D_FILL_M), table["d_away"].fillna(D_FILL_M))
+    reliability = pd.Series(1.0, index=table.index)
+    reliability[nearest > FAR_FROM_PLAYERS_M] *= FAR_DAMPING
+    reliability[table["ball_speed_smooth"].fillna(0.0) > FLIGHT_SPEED_MS] *= FLIGHT_DAMPING
+    return reliability
+
+
 def possession_score(table, fps):
     """Score in [-1, 1] per frame: positive favours HOME, negative AWAY."""
     d_home = table["d_home"].fillna(D_FILL_M)
@@ -262,9 +312,7 @@ def possession_score(table, fps):
     total = home_crowd + away_crowd
     crowd = ((home_crowd - away_crowd) / total.where(total > 0)).fillna(0.0)
 
-    reliability = pd.Series(1.0, index=table.index)
-    reliability[np.minimum(d_home, d_away) > FAR_FROM_PLAYERS_M] *= FAR_DAMPING
-    reliability[table["ball_speed_smooth"].fillna(0.0) > FLIGHT_SPEED_MS] *= FLIGHT_DAMPING
+    reliability = reliability_factor(table)
 
     weights = W_PROXIMITY + W_PERSISTENCE + W_TREND + W_CROWD
     score = (
@@ -359,8 +407,156 @@ def merge_short_spells(labels, min_len):
     return np.repeat([r[0] for r in runs], [r[1] for r in runs]).astype("<U1")
 
 
+# hidden Markov model
+HMM_STATES = np.array(["H", "A", "D"])
+
+
+def hmm_transitions(fps):
+    """Per-frame log transition matrix [from, to] over H, A, D, built from the football priors.
+
+    A possession's first MIN_CONTROL_S are forced by the duration chain in viterbi(), so only the
+    remainder of the mean possession is left to the geometric "steady" part modelled here.
+    """
+    p_end = 1 / ((MEAN_POSSESSION_S - MIN_CONTROL_S) * fps)  # a possession ends, either way
+    p_go_dead = p_end * SHARE_ENDED_BY_STOPPAGE       # ...by a stoppage
+    p_switch = p_end * (1 - SHARE_ENDED_BY_STOPPAGE)  # ...by a turnover in open play
+    p_dead_end = 1 / (MEAN_DEAD_S * fps)
+    T = np.array([
+        [1 - p_end, p_switch, p_go_dead],                  # from H
+        [p_switch, 1 - p_end, p_go_dead],                  # from A
+        [p_dead_end / 2, p_dead_end / 2, 1 - p_dead_end],  # from D: either team restarts
+    ])
+    return np.log(T)
+
+
+def evidence_gain(log_T, fps):
+    """Scale of the H/A evidence, derived from FLIP_SCORE / FLIP_S instead of being set by hand.
+
+    A new possession inside another one costs two switches (there and back). It should appear once
+    counter-evidence of strength FLIP_SCORE has lasted FLIP_S, and H and A differ by 2 * gain * score
+    per frame, so gain = 2 * switch_cost / (2 * FLIP_SCORE * frames).
+    """
+    switch_cost = log_T[0, 0] - log_T[0, 1]
+    return switch_cost / (FLIP_SCORE * frames(FLIP_S, fps))
+
+
+def dead_probability(sources):
+    """Per-frame dead-ball probability: noisy-OR of the rules that fire, on top of DEAD_PROB_BASE."""
+    alive = np.full(len(next(iter(sources.values()))), 1 - DEAD_PROB_BASE)
+    for name, mask in sources.items():
+        alive = alive * np.where(mask, 1 - DEAD_PROB[name], 1.0)
+    return 1 - alive
+
+
+def hmm_log_emissions(evidence, dead_prob, gain):
+    """(n, 3) log-emissions for H, A, D. evidence in [-1, 1] (+ = home), already damped by reliability."""
+    d = np.clip(dead_prob, 1e-3, 1 - 1e-3)
+    alive = np.log1p(-d)
+    s = np.nan_to_num(evidence)
+    return np.column_stack([gain * s + alive, -gain * s + alive, np.log(d)])
+
+
+def viterbi(log_e, log_T, min_len):
+    """Most likely state sequence (indices into HMM_STATES) for one half.
+
+    A possession won in open play must last at least min_len frames (CHALLENGE.md: only a
+    controlled possession changes hands). Each team has a chain of min_len states: a turnover
+    enters the opponent's first chain state and must walk the whole chain, so shorter spells are
+    impossible. A restart after D enters the last ("steady") state directly, because the rules give
+    the restart team the ball. Chain states cannot go dead: if the ball goes out before the
+    challenger has control, the best path keeps the previous team until the stoppage.
+    """
+    m = max(1, min_len)
+    stay, switch, go_dead = log_T[0, 0], log_T[0, 1], log_T[0, 2]
+    restart, dead_stay = log_T[2, 0], log_T[2, 2]
+    n = len(log_e)
+
+    # v[team] holds the chain scores, index m - 1 being the steady state; team 0 = H, 1 = A.
+    v = np.full((2, m), -np.inf)
+    v[0, m - 1], v[1, m - 1] = log_e[0, 0], log_e[0, 1]   # a half starts with a kick-off: no chain
+    v_dead = log_e[0, 2]
+    # Back-pointers, stored only where there is a choice: 0 = stayed, 1 = came from the chain
+    # (or from the other team's steady state when m == 1), 2 = came from D.
+    back_steady = np.zeros((n, 2), dtype=np.int8)
+    back_dead = np.zeros(n, dtype=np.int8)      # 0 = stayed dead, 1 = from H, 2 = from A
+
+    for t in range(1, n):
+        new = np.empty_like(v)
+        for team in (0, 1):
+            other = v[1 - team, m - 1]
+            own = v[team]
+            before = own[m - 2] if m > 1 else other + switch
+            cand = (own[m - 1] + stay, before, v_dead + restart)
+            k = int(np.argmax(cand))
+            back_steady[t, team] = k
+            new[team, m - 1] = cand[k]
+            if m > 1:
+                new[team, 1:m - 1] = own[0:m - 2]
+                new[team, 0] = other + switch
+        cand = (v_dead + dead_stay, v[0, m - 1] + go_dead, v[1, m - 1] + go_dead)
+        k = int(np.argmax(cand))
+        back_dead[t] = k
+        v_dead = cand[k] + log_e[t, 2]
+        new[0] += log_e[t, 0]
+        new[1] += log_e[t, 1]
+        v = new
+
+    # Backtrack over (team, chain index); team 2 = D.
+    best = int(np.argmax(v.ravel()))
+    state = (2, 0) if v_dead >= v.ravel()[best] else divmod(best, m)
+    path = np.empty(n, dtype=np.int8)
+    for t in range(n - 1, -1, -1):
+        team, k = state
+        path[t] = team
+        if t == 0:
+            break
+        if team == 2:
+            state = [(2, 0), (0, m - 1), (1, m - 1)][back_dead[t]]
+        elif k == m - 1:
+            came = back_steady[t, team]
+            if came == 0:
+                state = (team, m - 1)
+            elif came == 1:
+                state = (team, m - 2) if m > 1 else (1 - team, m - 1)
+            else:
+                state = (2, 0)
+        elif k > 0:
+            state = (team, k - 1)
+        else:
+            state = (1 - team, m - 1)
+    return path
+
+
+def predict_hmm(table, game):
+    """H/A/D labels from the HMM, X outside the graded halves."""
+    fps = GAMES[game]["fps"]
+    pitch = GAMES[game]["pitch"]
+
+    sources = dict(dead_sources(table, fps, pitch))
+    if D_BEFORE_KICKOFF:
+        sources["before kick-off"] = pre_kickoff_frames(table, game)
+    dead_prob = dead_probability(sources)
+
+    evidence = (proximity_evidence(table) * reliability_factor(table)).to_numpy(dtype=float)
+    log_T = hmm_transitions(fps)
+    log_e = hmm_log_emissions(evidence, dead_prob, evidence_gain(log_T, fps))
+
+    labels = np.full(len(table), UNGRADED_LABEL, dtype="<U1")
+    half = table["half"].to_numpy()
+    for number in sorted(set(half.tolist()) - {0}):
+        idx = np.flatnonzero(half == number)
+        labels[idx] = HMM_STATES[viterbi(log_e[idx], log_T, frames(MIN_CONTROL_S, fps))]
+
+    out = pd.DataFrame({"frame": table["frame"].to_numpy(), "label": labels})
+    out["half"] = half
+    out["score"] = evidence
+    return out
+
+
 # pipeline
 def predict(table, game):
+    if USE_HMM:
+        return predict_hmm(table, game)
     fps = GAMES[game]["fps"]
     pitch = GAMES[game]["pitch"]
 
