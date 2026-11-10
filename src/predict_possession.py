@@ -60,19 +60,19 @@ from starter.baseline import AWAY, HOME
 
 
 # Use of Smart Tagging 
-USE_SMART_TAGGING = False     # [CLIP] False = tracking features only
+USE_SMART_TAGGING = False     # False = tracking features only
 DEAD_FROM_SET_PIECE_TAG = True   # only used when USE_SMART_TAGGING is True
 DEAD_FROM_GOAL_TAG = True        # only used when USE_SMART_TAGGING is True
-TAG_POSS_BONUS = 0.0          # [CLIP] added to score toward the team in a possession tag
-TAG_DEF_BONUS = 0.0           # [CLIP] added toward the OPPONENT of a defending-team tag
+TAG_POSS_BONUS = 0.25          # added to score toward the team in a possession tag
+TAG_DEF_BONUS = 0.125           # added toward the OPPONENT of a defending-team tag
 
 # Dead ball (D)
 BALL_OUT_MIN_S = 1.0          # ball outside pitch at least this long -> D
 BALL_LOST_DEAD_S = 4.0        # ball untracked this long near a boundary -> D
 BOUNDARY_NEAR_M = 3.0         # "near a boundary" distance for the rule above
-DEAD_FROM_STATIONARY_BALL = True   # [CLIP] rule added after seeing D-rule results
-STATIONARY_SPEED_MS = 1.0     # [CLIP] smoothed ball speed below this = stationary
-STATIONARY_MIN_S = 2.0        # [CLIP] ... for at least this long
+DEAD_FROM_STATIONARY_BALL = True   # IFAB rule 13 and 16: free kicks, goal...
+STATIONARY_SPEED_MS = 1.0     # Bangsbo, a carried ball moves at player´s speed
+STATIONARY_MIN_S = 2.0        # About twice the mean single-player possession (Carling 2010) 
 DEAD_BRIDGE_S = 1.0           # alive gap shorter than this between two D stretches -> D
 D_BEFORE_KICKOFF = True       # FAQ: graded frames before the 2nd-half kick-off are all D
 PRE_KICKOFF_ANCHORS = {2: "kickoff_2nd"}   # half -> kick-off anchor in games.py; half 1 is graded from its kick-off
@@ -96,14 +96,14 @@ SCORE_SMOOTH_S = 0.6          # centred rolling-mean window on the score
 
 # Decision rule
 ENTER_THRESHOLD = 0.25        # |score| needed to assign a team after a stoppage
-SWITCH_THRESHOLD = 0.35       # [CLIP] |score| needed to flip from one team to the other
+SWITCH_THRESHOLD = 0.5       # like FLIP_SCORE, how strong counter-evidence must be to overturn a possession
 RESET_AFTER_DEAD = True       # after a D spell, forget the previous possessor
-MIN_SPELL_S = 2.0             # [CLIP] absorb H/A spells shorter than this
+MIN_SPELL_S = 2.0             # CHALLENGE.md says possession only changes after a player keeps the ball for a few seconds
 
 # Hidden Markov model + Viterbi. When on, it replaces the score smoothing, the state machine,
 # the D gap bridging and the spell cleanup above. Evidence: proximity x reliability for H/A,
 # the dead-ball rules as soft probabilities for D.
-USE_HMM = True
+USE_HMM = False
 MEAN_POSSESSION_S = 15.0      # ~57 min ball in play / ~230 possessions (Taha & Ali 2023; Jerome et al. 2024)
 MEAN_DEAD_S = 18.7            # mean game interruption (Siegle & Lames 2012)
 SHARE_ENDED_BY_STOPPAGE = 0.47  # running phase 32.1 s / possession 15 s (Siegle & Lames 2012)
@@ -630,10 +630,10 @@ def main():
     args = parser.parse_args()
 
     features_path = args.features or os.path.join(
-        DATA_DIR, "derived", "{}_features.csv".format(args.game)
+        DATA_DIR, "derived", "{}_features_corrected.csv".format(args.game)
     )
     out_path = args.out or os.path.join(
-        RESULTS_DIR, "{}_predictions.csv".format(args.game)
+        RESULTS_DIR, "{}_predictions_with_literature_wo_hmm.csv".format(args.game)
     )
 
     features = pd.read_csv(features_path)
