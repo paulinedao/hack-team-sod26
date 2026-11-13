@@ -217,7 +217,7 @@ def sportec_arrays(match_id):
 
     print("loading {} ({}) with kloppy, this downloads and parses the full match ...".format(
         match_id, SPORTEC_MATCHES.get(match_id, "?")))
-    dataset = sportec.load_open_tracking_data(match_id=match_id, only_alive=False)
+    dataset = sportec.load_open_tracking_data(match_id=match_id, only_alive=False, coordinates="sportec")
     meta = dataset.metadata
 
     fps = int(round(meta.frame_rate))
@@ -227,6 +227,8 @@ def sportec_arrays(match_id):
     dims = meta.pitch_dimensions
     length = float(dims.pitch_length)
     width = float(dims.pitch_width)
+    if dims.x_dim.max is None or abs(dims.x_dim.max - dims.x_dim.min) < 10:
+        raise ValueError("{}: pitch x range {}..{} is not in metres".format(match_id, dims.x_dim.min, dims.x_dim.max))
 
     slots = []
     team_of_track = []
