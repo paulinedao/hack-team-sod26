@@ -26,17 +26,6 @@ Steps (run them in this order):
 
     4. run             Degrade, build features, run predict_possession.predict() unchanged, write
                        predictions + ground truth CSVs, and score with possession_metrics.
-
-Commands:
-    python src/external_validation.py check-features
-    python src/external_validation.py prepare --matches J03WMX J03WN1
-    python src/external_validation.py profile --matches J03WMX
-    python src/external_validation.py run --matches J03WMX J03WN1 --seeds 0 1 2
-    python src/external_validation.py run --matches J03WMX --clean            # no degradation
-    python src/external_validation.py run --matches J03WMX --set USE_HMM=True --set MIN_SPELL_S=3.0
-
-Honest protocol: tune predict_possession parameters (--set) on some matches, report on the
-others, and look at BAR-ATH's 5 minutes only once at the end.
 """
 
 import argparse
