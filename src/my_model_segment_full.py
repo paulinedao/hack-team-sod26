@@ -1,13 +1,14 @@
 """Full tracking + Smart Tagging + segment-level possession inference.
 
-Repository location: starter/my_model_segment_full.py
-Run from repository root: python starter/my_model_segment_full.py --data-dir /path/to/dataset
+Repository location: src/my_model_segment_full.py
+Run from repository root: python src/my_model_segment_full.py --data-dir /path/to/dataset
 
 Uses no possession ground truth. Requires numpy, pandas and starter/baseline.py.
 """
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
@@ -15,7 +16,13 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pandas as pd
 
-from baseline import build, smooth
+ROOT = Path(__file__).resolve().parents[1]
+for extra in (ROOT, ROOT / "src", ROOT / "starter", ROOT / "evaluation"):
+    extra_str = str(extra)
+    if extra_str not in sys.path:
+        sys.path.insert(0, extra_str)
+
+from starter.baseline import build, smooth
 
 FPS = 25
 ATTACK_TAGS = {
@@ -183,7 +190,8 @@ def describe(labels: np.ndarray) -> dict:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     repo = Path(__file__).resolve().parents[1]
-    default_data = repo.parent / "data/More Than A Hack 2027 - Initial Challenge - Dataset"
+    env_data = Path(os.environ.get("MTAH_DATA_DIR") or repo / "data").expanduser()
+    default_data = env_data if env_data.exists() else repo / "data"
     parser.add_argument("--data-dir", type=Path, default=default_data)
     parser.add_argument("--smart-xml", type=Path)
     parser.add_argument("--output", type=Path, default=repo / "evaluation/results/my_model_segment_full.csv")
