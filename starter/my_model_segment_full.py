@@ -164,6 +164,14 @@ def refine_segments(labels: np.ndarray, raw: np.ndarray, max_island_seconds: flo
              "duration_s", "old", "new", "tracking_support"])
 
 
+def force_early_second_half_deadball(labels: np.ndarray, start: int = 110_808,
+                                    kickoff: int = 113_742) -> np.ndarray:
+    """Force the dead-ball interval before the second-half kickoff to D."""
+    result = np.asarray(labels, dtype="<U1").copy()
+    result[start:kickoff] = "D"
+    return result
+
+
 def describe(labels: np.ndarray) -> dict:
     runs = get_runs(labels)
     durations = np.array([(e - s) / FPS for s, e, label in runs if label in {"H", "A"}])
@@ -222,8 +230,12 @@ def main():
     print("Smart Tagging changed frames:", int(np.sum(smart != baseline)))
     print("Segment refinement changed frames:", int(np.sum(refined != smart)))
 
+    final_labels = force_early_second_half_deadball(refined)
+    print("Full-sequence labels:", len(final_labels))
+    print("Second-half pre-kickoff forced D frames:", int(np.sum(final_labels[110_808:113_742] == "D")))
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame({"frame": np.arange(len(raw)), "label": refined}).to_csv(args.output, index=False)
+    pd.DataFrame({"frame": np.arange(len(raw)), "label": final_labels}).to_csv(args.output, index=False)
     args.diagnostics_dir.mkdir(parents=True, exist_ok=True)
     changes.to_csv(args.diagnostics_dir / "segment_changes.csv", index=False)
     event_table.to_csv(args.diagnostics_dir / "smart_tagging_events.csv", index=False)
