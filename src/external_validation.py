@@ -26,6 +26,17 @@ Steps (run them in this order):
 
     4. run             Degrade, build features, run predict_possession.predict() unchanged, write
                        predictions + ground truth CSVs, and score with possession_metrics.
+
+Commands:
+    python src/external_validation.py check-features
+    python src/external_validation.py prepare --matches J03WMX J03WN1
+    python src/external_validation.py profile --matches J03WMX
+    python src/external_validation.py run --matches J03WMX J03WN1 --seeds 0 1 2
+    python src/external_validation.py run --matches J03WMX --clean            # no degradation
+    python src/external_validation.py run --matches J03WMX --set USE_HMM=True --set MIN_SPELL_S=3.0
+
+Honest protocol: tune predict_possession parameters (--set) on some matches, report on the
+others, and look at BAR-ATH's 5 minutes only once at the end.
 """
 
 import argparse
@@ -80,11 +91,21 @@ PLAYER_GAP_MEAN_S = 3.0       # mean length of a player dropout
 TEAM_ERROR_RATE = 0.0         # share of tracklets assigned to the wrong team (ATD has no IDs, so a
                               # fragment can land in the other team); try e.g. 0.02
 
-# predict_possession settings forced for external data (no Smart Tagging, no BAR-ATH anchors)
+DEGRADATION_PARAMS = {
+    "BALL_GAPS_FROM_REFERENCE", "BALL_NOISE_M", "PLAYER_NOISE_M", "NOISE_RHO",
+    "PLAYER_TRACKED_FROM_REFERENCE", "PLAYER_GAP_MEAN_S", "TEAM_ERROR_RATE",
+}
+
+# predict_possession settings forced for external data. The second-half D correction below is a
+# BAR-ATH-only rule (see games.py / predict_possession.py) and must never leak into the 7-match
+# external validation set.
 FORCED_PREDICT_SETTINGS = {
     "USE_SMART_TAGGING": False,
     "D_BEFORE_KICKOFF": False,
 }
+
+# Challenge-specific BAR-ATH adjustments are not valid for other matches and must be ignored here.
+DISALLOWED_EXTERNAL_OVERRIDE = {"D_BEFORE_KICKOFF"}
 
 
 # =============================================================================
@@ -217,7 +238,10 @@ def sportec_arrays(match_id):
 
     print("loading {} ({}) with kloppy, this downloads and parses the full match ...".format(
         match_id, SPORTEC_MATCHES.get(match_id, "?")))
-    dataset = sportec.load_open_tracking_data(match_id=match_id, only_alive=False, coordinates="sportec")
+    # coordinates="sportec" = metres, origin at the centre. kloppy's default is normalised 0..1,
+    # which would silently make every distance and speed ~100x too small.
+    dataset = sportec.load_open_tracking_data(
+        match_id=match_id, only_alive=False, coordinates="sportec")
     meta = dataset.metadata
 
     fps = int(round(meta.frame_rate))
@@ -228,7 +252,8 @@ def sportec_arrays(match_id):
     length = float(dims.pitch_length)
     width = float(dims.pitch_width)
     if dims.x_dim.max is None or abs(dims.x_dim.max - dims.x_dim.min) < 10:
-        raise ValueError("{}: pitch x range {}..{} is not in metres".format(match_id, dims.x_dim.min, dims.x_dim.max))
+        raise ValueError("{}: pitch x range {}..{} is not in metres".format(
+            match_id, dims.x_dim.min, dims.x_dim.max))
 
     slots = []
     team_of_track = []
@@ -527,15 +552,31 @@ def cmd_profile(args):
 # =============================================================================
 
 def apply_predict_settings(overrides):
-    """Force external-data settings, then apply --set NAME=VALUE overrides to predict_possession."""
+    """Force external-data settings, then apply --set NAME=VALUE overrides to predict_possession.
+
+    The BAR-ATH second-half D correction is challenge-specific and must stay off on all external
+    matches, even if a caller passes --set D_BEFORE_KICKOFF=True.
+    """
     settings = dict(FORCED_PREDICT_SETTINGS)
     for item in overrides:
         name, _, value = item.partition("=")
+        if name in DEGRADATION_PARAMS:
+            # degradation constants of this file, e.g. --set BALL_GAPS_FROM_REFERENCE=False
+            globals()[name] = ast.literal_eval(value)
+            print("degradation override: {} = {}".format(name, globals()[name]))
+            continue
+        if name in DISALLOWED_EXTERNAL_OVERRIDE:
+            print("ignoring challenge-only override for external validation: {} = {} (forced False)".format(
+                name, ast.literal_eval(value)))
+            continue
         if not hasattr(pp, name):
             sys.exit("predict_possession has no parameter {!r}".format(name))
         settings[name] = ast.literal_eval(value)
     for name, value in settings.items():
         setattr(pp, name, value)
+    # Freeze the challenge-only D rule off for every external match, regardless of any override.
+    pp.D_BEFORE_KICKOFF = False
+    settings["D_BEFORE_KICKOFF"] = False
     return settings
 
 
