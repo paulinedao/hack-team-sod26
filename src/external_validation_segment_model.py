@@ -35,9 +35,8 @@ sys.path.insert(0, str(ROOT / "evaluation"))
 
 import possession_metrics as pm
 
-from starter.my_model_segment_full import (
+from my_model_segment_full import (
     FPS,
-    apply_grading,
     describe,
     normalize_labels,
     refine_segments,
@@ -185,7 +184,7 @@ def run_segment_model(raw: np.ndarray, *, window: int = 100, tag_min_support: fl
         raise ValueError("Smoothed and raw frame counts differ")
 
     if smart_xml:
-        from starter.my_model_segment_full import parse_events, tactical_evidence, apply_smart_tags
+        from my_model_segment_full import parse_events, tactical_evidence, apply_smart_tags
 
         events, event_table = parse_events(Path(smart_xml), len(raw))
         if not events:
@@ -205,7 +204,9 @@ def run_segment_model(raw: np.ndarray, *, window: int = 100, tag_min_support: fl
         min_track_support=min_track_support,
         max_passes=max_passes,
     )
-    final = apply_grading(refined)
+    # The second-half kickoff dead-ball correction is a BAR-ATH-specific rule and is
+    # intentionally not applied in the external validation suite for these 7 matches.
+    final = refined
     return final, {
         "baseline": baseline,
         "smart": smart,
