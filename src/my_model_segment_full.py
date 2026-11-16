@@ -194,7 +194,7 @@ def main():
     default_data = env_data if env_data.exists() else repo / "data"
     parser.add_argument("--data-dir", type=Path, default=default_data)
     parser.add_argument("--smart-xml", type=Path)
-    parser.add_argument("--output", type=Path, default=repo / "evaluation/results/my_model_segment_full.csv")
+    parser.add_argument("--output", type=Path, default=repo / "evaluation/results/SoD26.csv")
     parser.add_argument("--diagnostics-dir", type=Path, default=repo / "evaluation/segment_diagnostics")
     parser.add_argument("--window", type=int, default=100)
     parser.add_argument("--tag-min-support", type=float, default=0.35)
