@@ -21,7 +21,11 @@ data/
     └── sportec/
 ```
 
-The main script uses the tactical source by default. It reads the tactical tracking files (`BAR-ATH_tactical_atd.txt` / `BAR-ATH_tactical_atd.xml`) and the tactical smart-tagging file (`BAR-ATH_tactical_smart_tagging.xml`) from the `data/tactical/` folder. The `data/broadcast/` folder is optional and is not used by the challenge pipeline.
+The main script uses the tactical source by default. 
+
+It reads the tactical tracking files (`BAR-ATH_tactical_atd.txt` / `BAR-ATH_tactical_atd.xml`) and the tactical smart-tagging file (`BAR-ATH_tactical_smart_tagging.xml`) from the `data/tactical/` folder. 
+
+The `data/broadcast/` folder is optional and is not used by the challenge pipeline.
 
 ## Environment
 
@@ -43,7 +47,7 @@ python -m pip install -r requirements.txt
 python src/my_model_segment_full.py
 ```
 
- The script auto-detects the dataset from the repo's `data/` folder or from `MTAH_DATA_DIR` when it is set.
+The script auto-detects the dataset from the repo's `data/` folder or from `MTAH_DATA_DIR` when it is set.
 
 ### Alternative: uv
 
@@ -55,4 +59,11 @@ source .venv/bin/activate
 uv pip install -r requirements.txt
 uv run python src/my_model_segment_full.py
 ```
+
+### Expected output
+
+The script writes a submission CSV with one row per video frame in the format `frame,label`.
+
+By default it is saved to `evaluation/results/my_model_segment_full.csv`.
+It also creates diagnostics under `evaluation/segment_diagnostics/`.
 
