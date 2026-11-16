@@ -1,5 +1,7 @@
 # More than a Hack 2027 — Phase 1: Ball Possession
 
+> Team pipeline note: for the custom model workflow used in this repository, see [RUN_OUR_PIPELINE.md](RUN_OUR_PIPELINE.md). It explains the expected data layout, the package requirements, and the exact commands to run the model.
+
 **Organised by [Metrica Sports](https://metrica-sports.com), [FC Barcelona](https://www.fcbarcelona.com)
 and the [Mobile World Capital Barcelona](https://www.mwcbarcelona.com)**, at the Talent Arena in Barcelona.
 
