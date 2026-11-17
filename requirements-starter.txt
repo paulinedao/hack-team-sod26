@@ -8,7 +8,7 @@
 # a scored entry with numpy alone.
 -r requirements.txt
 
-kloppy==3.18.0
+kloppy==3.19.1
 matplotlib
 
 # For the notebooks in starter/
