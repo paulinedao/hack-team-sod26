@@ -64,6 +64,6 @@ uv run python src/my_model_segment_full.py
 
 The script writes a submission CSV with one row per video frame in the format `frame,label`.
 
-By default it is saved to `evaluation/results/my_model_segment_full.csv`.
+By default it is saved to `evaluation/results/SoD26.csv`.
 It also creates diagnostics under `evaluation/segment_diagnostics/`.
 
