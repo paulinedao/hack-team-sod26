@@ -13,8 +13,12 @@ It does not require the BAR-ATH ATD files. Instead it:
   4. applies the delayed second-half kickoff grading correction
   5. scores the prediction against the Sportec ground truth
 
+Matches not yet in data/external/sportec are downloaded with kloppy and cached there as .npz,
+so later runs work offline.
+
 Run from repo root:
-    python src/external_validation_segment_model.py --match J03WMX
+    python src/external_validation_segment_model.py --prepare --match all# download + cache only
+    python src/external_validation_segment_model.py --match all
 """
 
 from __future__ import annotations
@@ -80,18 +84,39 @@ def load_cached_match(match_id: str) -> dict | None:
     return match
 
 
-def sportec_match(match_id: str) -> dict:
-    """Load one Sportec match from cache if present, otherwise download it with kloppy."""
-    cached = load_cached_match(match_id)
+def sportec_match(match_id: str, force_download: bool = False) -> dict:
+    """Load one Sportec match from cache if present, otherwise download it with kloppy and cache it."""
+    cached = None if force_download else load_cached_match(match_id)
     if cached is not None:
         print(f"using cached Sportec arrays for {match_id}: {CACHE_DIR / f'{match_id}.npz'}")
         return cached
+
+    match = download_sportec_match(match_id)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = CACHE_DIR / f"{match_id}.npz"
+    np.savez_compressed(path, **match)
+    print(f"cached Sportec arrays for {match_id}: {path}")
+    # Reload so the returned dict has the same types as a cache hit.
+    return load_cached_match(match_id)
+
+
+def download_sportec_match(match_id: str) -> dict:
+    """Download one Sportec match with kloppy and convert it to the cached array layout."""
 
     if KLoppyImportError is not None:
         raise RuntimeError(f"kloppy is required for external validation: {KLoppyImportError}")
 
     print(f"loading {match_id} ({SPORTEC_MATCHES.get(match_id, '?')}) with kloppy ...")
-    dataset = sportec.load_open_tracking_data(match_id=match_id, only_alive=False, coordinates="sportec")
+    try:
+        dataset = sportec.load_open_tracking_data(match_id=match_id, only_alive=False, coordinates="sportec")
+    except Exception as exc:
+        if type(exc).__name__ in ("XMLSyntaxError", "InputNotFoundError"):
+            raise RuntimeError(
+                f"{match_id}: kloppy could not download the match XML from huggingface.co. "
+                "The site is probably blocked by a proxy; run --prepare on an unrestricted network "
+                f"and copy the .npz files into {CACHE_DIR}"
+            ) from exc
+        raise
     meta = dataset.metadata
     fps = int(round(meta.frame_rate))
     if fps != FPS:
@@ -242,9 +267,9 @@ def score_predictions(gt: np.ndarray, pred: np.ndarray, bootstrap_n: int = 0) ->
 def evaluate_match(match_id: str, *, window: int, tag_min_support: float, tag_radius_seconds: float,
                    max_island_seconds: float, min_neighbor_seconds: float,
                    min_track_support: float, max_passes: int, smart_xml: str | None,
-                   bootstrap: int) -> dict:
+                   bootstrap: int, force_download: bool = False) -> dict:
     """Evaluate one external Sportec match and return a row of metrics."""
-    match = sportec_match(match_id)
+    match = sportec_match(match_id, force_download=force_download)
     raw = external_raw_from_labels(match["labels"])
     pred, info = run_segment_model(
         raw,
@@ -298,9 +323,22 @@ def main() -> None:
     parser.add_argument("--min-track-support", type=float, default=0.60)
     parser.add_argument("--max-passes", type=int, default=3)
     parser.add_argument("--smart-xml", type=Path, help="optional smart tagging XML for the segment model")
+    parser.add_argument("--prepare", action="store_true",
+                        help="only download and cache the selected matches, do not run the model")
+    parser.add_argument("--force-download", action="store_true",
+                        help="re-download matches even if they are already cached")
     args = parser.parse_args()
 
     match_ids = sorted(SPORTEC_MATCHES) if args.match == "all" else [args.match]
+
+    if args.prepare:
+        for match_id in match_ids:
+            match = sportec_match(match_id, force_download=args.force_download)
+            print(f"  {match_id}: H = {match['names'][0]}, A = {match['names'][1]}; "
+                  f"{len(match['ball'])} frames, {len(match['team_of_track'])} slots")
+            print("  GT profile:", describe(np.asarray(match["labels"], dtype="<U1")))
+        return
+
     rows = []
     for match_id in match_ids:
         rows.append(evaluate_match(
@@ -314,6 +352,7 @@ def main() -> None:
             max_passes=args.max_passes,
             smart_xml=str(args.smart_xml) if args.smart_xml else None,
             bootstrap=args.bootstrap,
+            force_download=args.force_download,
         ))
 
     summary = summarize_scores(rows)
